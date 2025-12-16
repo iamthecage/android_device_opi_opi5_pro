@@ -18,6 +18,15 @@ OVERRIDE_PRODUCT_COMPRESSED_APEX := false
 # API level
 PRODUCT_SHIPPING_API_LEVEL := 36
 
+# Super partition configuration for Kinhank X5 Pro
+# Explicitly define target copy-out locations for all dynamic partitions
+TARGET_COPY_OUT_SYSTEM_EXT := system_ext
+TARGET_COPY_OUT_ODM := odm
+TARGET_COPY_OUT_VENDOR_DLKM := vendor_dlkm
+TARGET_COPY_OUT_ODM_DLKM := odm_dlkm
+# Enable super partition build (may be implicit with PRODUCT_USE_DYNAMIC_PARTITIONS)
+PRODUCT_BUILD_SUPER_PARTITION := true
+
 
 # Audio
 PRODUCT_PACKAGES += \

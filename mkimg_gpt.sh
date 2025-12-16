@@ -3,10 +3,10 @@
 # Copyright (C) 2025 Venkata Atchuta Bheemeswara Sarma Darbha
 # SPDX-License-Identifier: Apache-2.0
 #
-# Create an RK3588 GPT AOSP image (no changes to original sector/start/size values).
+# Create an RK3588 GPT AOSP image for Kinhank X5 Pro with super.img dynamic partitions
 # - Writes U-Boot at sector 64
-# - Creates GPT with named partitions so Android creates /dev/block/by-name/*
-# - Copies boot/system/vendor images (dd)
+# - Creates GPT with named partitions matching Kinhank stock firmware layout
+# - Copies boot.img and super.img (dynamic partitions)
 # - Creates metadata/userdata ext4 and sets proper GPT & fs labels
 # - Uses kpartx to map partitions and cleans up reliably
 #
@@ -36,9 +36,10 @@ trap cleanup EXIT
 : "${ANDROID_PRODUCT_OUT:?ANDROID_PRODUCT_OUT environment variable is not set. Run lunch first.}"
 
 
-for PART in boot system vendor; do
+# Check for required partition images (super.img is auto-generated with dynamic partitions)
+for PART in boot super; do
   if [ ! -f "${ANDROID_PRODUCT_OUT}/${PART}.img" ]; then
-    exit_with_error "Missing partition image: ${ANDROID_PRODUCT_OUT}/${PART}.img — run 'make ${PART}image' first."
+    exit_with_error "Missing partition image: ${ANDROID_PRODUCT_OUT}/${PART}.img — run 'make bootimage systemimage vendorimage productimage' to generate super.img"
   fi
 done
 
@@ -47,10 +48,10 @@ if [ ! -f "${UBOOT_BIN}" ]; then
   exit_with_error "Missing U-Boot: ${UBOOT_BIN}"
 fi
 
-VERSION=OrangePi_5Pro_aosp
+VERSION=Kinhank_X5Pro_aosp
 DATE=$(date +%Y%m%d)
 TARGET=$(echo "${TARGET_PRODUCT}" | sed 's/^aosp_//')
-IMGNAME=${VERSION}-${DATE}-${TARGET}_gpt.img
+IMGNAME=${VERSION}-${DATE}-${TARGET}_super.img
 IMGSIZE=19456MiB
 IMAGE_PATH="${ANDROID_PRODUCT_OUT}/${IMGNAME}"
 
@@ -70,24 +71,24 @@ sync
 echo "Partitioning image using sfdisk (GPT) with explicit partition NAMES..."
 
 
+# Partition layout matching Kinhank X5 Pro stock firmware
+# From stock: super partition is mmcblk2p14 with 4096000 blocks (512 bytes each) = 8192000 sectors
 PART_TABLE=$(cat <<EOF
 label: gpt
 unit: sectors
 
-# Partition 1: boot (FAT32)
-${IMAGE_PATH}1 : start=32768, size=262144, type=C12A7328-F81F-11D2-BA4B-00A0C93EC93B, name="boot"
+# Partition 1: boot - 64MB (131072 sectors at 512 bytes/sector)
+${IMAGE_PATH}1 : start=32768, size=131072, type=C12A7328-F81F-11D2-BA4B-00A0C93EC93B, name="boot"
 
-# Partition 2: system (EXT4)
-${IMAGE_PATH}2 : start=303104, size=6291456, type=0FC63DAF-8483-4772-8E79-3D69D8477DE4, name="system"
+# Partition 2: super - ~4GB dynamic partition container (8192000 sectors = 4194304000 bytes)
+# This contains system, system_ext, vendor, vendor_dlkm, odm, odm_dlkm, product
+${IMAGE_PATH}2 : start=163840, size=8192000, type=0FC63DAF-8483-4772-8E79-3D69D8477DE4, name="super"
 
-# Partition 3: vendor (EXT4)
-${IMAGE_PATH}3 : start=6596608, size=786432, type=0FC63DAF-8483-4772-8E79-3D69D8477DE4, name="vendor"
+# Partition 3: metadata - 16MB (32768 sectors)
+${IMAGE_PATH}3 : start=8355840, size=32768, type=0FC63DAF-8483-4772-8E79-3D69D8477DE4, name="metadata"
 
-# Partition 4: metadata (EXT4)
-${IMAGE_PATH}4 : start=7385088, size=32768, type=0FC63DAF-8483-4772-8E79-3D69D8477DE4, name="metadata"
-
-# Partition 5: userdata (EXT4)
-${IMAGE_PATH}5 : start=7417856, type=0FC63DAF-8483-4772-8E79-3D69D8477DE4, name="userdata"
+# Partition 4: userdata - rest of disk
+${IMAGE_PATH}4 : start=8388608, type=0FC63DAF-8483-4772-8E79-3D69D8477DE4, name="userdata"
 EOF
 )
 
@@ -117,37 +118,23 @@ if [ ! -b "/dev/mapper/${LOOPDEV}p1" ]; then
 fi
 
 # --- Copy images into partitions ---
-echo "Writing boot image to p1 (FAT partition)..."
+echo "Writing boot image to p1..."
 sudo dd if="${ANDROID_PRODUCT_OUT}/boot.img" of="/dev/mapper/${LOOPDEV}p1" bs=1M conv=notrunc status=progress
 
-echo "Writing system image to p2 (raw dd)."
-# Use conv=notrunc so we don't shrink partition image area; status=progress for visibility
-sudo dd if="${ANDROID_PRODUCT_OUT}/system.img" of="/dev/mapper/${LOOPDEV}p2" bs=1M conv=notrunc status=progress
-
-echo "Writing vendor image to p3 (raw dd)."
-sudo dd if="${ANDROID_PRODUCT_OUT}/vendor.img" of="/dev/mapper/${LOOPDEV}p3" bs=1M conv=notrunc status=progress
+echo "Writing super.img to p2 (contains system/vendor/product/etc dynamic partitions)..."
+# super.img contains all dynamic partitions: system, system_ext, vendor, vendor_dlkm, odm, odm_dlkm, product
+sudo dd if="${ANDROID_PRODUCT_OUT}/super.img" of="/dev/mapper/${LOOPDEV}p2" bs=1M conv=notrunc status=progress
 
 sync
 
-# --- Ensure filesystem labels and types are correct ---
-# Note: dd'ing system/vendor may already contain an internal FS label; we force the GPT
-# partition name above and set the filesystem label to match as a guard.
-echo "Setting filesystem labels on p2 (system) and p3 (vendor) and creating metadata/userdata..."
+# --- Create metadata and userdata filesystems ---
+# Note: super partition (p2) already contains a complete super.img with dynamic partition metadata
+# We don't try to label it - it has its own internal structure managed by lpmake
+echo "Creating metadata and userdata partitions..."
 
-# Try to set ext4 label on system; if it isn't an ext4, warn but continue.
-set +e
-sudo e2label "/dev/mapper/${LOOPDEV}p2" system 2>/dev/null
-E2_RC=$?
-if [ "${E2_RC}" -ne 0 ]; then
-  echo "Warning: /dev/mapper/${LOOPDEV}p2 does not appear to be ext4 or e2label failed. Continuing."
-fi
-sudo e2label "/dev/mapper/${LOOPDEV}p3" vendor 2>/dev/null || echo "Warning: e2label on vendor failed (maybe not ext4)."
-
-set -e
-
-# Create/format metadata and userdata partitions and set filesystem labels
-sudo mkfs.ext4 -F -L metadata "/dev/mapper/${LOOPDEV}p4"
-sudo mkfs.ext4 -F -L userdata "/dev/mapper/${LOOPDEV}p5"
+# Create/format metadata and userdata partitions
+sudo mkfs.ext4 -F -L metadata "/dev/mapper/${LOOPDEV}p3"
+sudo mkfs.ext4 -F -L userdata "/dev/mapper/${LOOPDEV}p4"
 sync
 
 # Final sanity: list by-name symlinks
@@ -159,8 +146,9 @@ sudo kpartx -d "${IMAGE_PATH}" || true
 # fix ownership
 sudo chown "${USER}:${USER}" "${IMAGE_PATH}"
 
-echo "✅ Created ${IMAGE_PATH} with GPT partition names and filesystem labels."
-echo "You should now be able to write this image to your SD/NVMe and boot RK3588. "
+echo "✅ Created ${IMAGE_PATH} with super.img dynamic partitions for Kinhank X5 Pro."
+echo "Partitions: boot, super (4GB with system/vendor/product/etc), metadata, userdata"
+echo "You can now write this image to your SD/eMMC/NVMe and boot on Kinhank X5 Pro."
 
 
 sudo sgdisk -p "${IMAGE_PATH}"
