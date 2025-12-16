@@ -21,6 +21,7 @@ PRODUCT_SHIPPING_API_LEVEL := 36
 # Super partition configuration for Kinhank X5 Pro
 # Explicitly define target copy-out locations for all dynamic partitions
 TARGET_COPY_OUT_SYSTEM_EXT := system_ext
+TARGET_COPY_OUT_PRODUCT := product
 TARGET_COPY_OUT_ODM := odm
 TARGET_COPY_OUT_VENDOR_DLKM := vendor_dlkm
 TARGET_COPY_OUT_ODM_DLKM := odm_dlkm
